@@ -9,12 +9,15 @@ import numpy as np
 import json
 import matplotlib.pyplot as plt
 from sklearn.metrics import accuracy_score
-from model import get_model  # Import our new factory
+from model import get_model
 
-# Config
+# --- CONFIG ---
 IMG_SIZE = 224
-SEQ_LEN = 16  # Reduced slightly to fit Transformers in memory
-BATCH_SIZE = 4
+SEQ_LEN = 16
+# INCREASED BATCH SIZE:
+# Since you have 2 GPUs, we can process more data at once.
+# Try 8 or 16. If you get "Out of Memory", lower it back to 4.
+BATCH_SIZE = 8
 
 
 class VideoDataset(Dataset):
@@ -38,7 +41,7 @@ class VideoDataset(Dataset):
             ret, frame = cap.read()
             if ret:
                 frame = cv2.resize(frame, (IMG_SIZE, IMG_SIZE))
-                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)  # Ensure RGB
+                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 frame = frame.astype(np.float32) / 255.0
                 frame = np.transpose(frame, (2, 0, 1))
                 frames.append(frame)
@@ -49,18 +52,23 @@ class VideoDataset(Dataset):
 
 
 def run_training(model_name, epochs=5, status_placeholder=None):
-    """
-    Main training function callable by Streamlit.
-    status_placeholder: A Streamlit element to write logs to.
-    """
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # --- GPU DIAGNOSTICS ---
+    if torch.cuda.is_available():
+        gpu_count = torch.cuda.device_count()
+        device = torch.device("cuda")
+        gpu_names = [torch.cuda.get_device_name(i) for i in range(gpu_count)]
+        msg = f"✅ SUCCESS: Detected {gpu_count} GPUs: {', '.join(gpu_names)}"
+    else:
+        device = torch.device("cpu")
+        msg = "⚠️ CRITICAL WARNING: PyTorch cannot see GPUs. Training will be slow (CPU)."
 
+    print(msg)
     if status_placeholder:
-        status_placeholder.text(f"Initializing {model_name} on {device}...")
+        status_placeholder.text(msg)
 
     # Load Data
     if not os.path.exists('dataset'):
-        return "Error: Dataset not found."
+        return "Error: Dataset not found. Run preprocess.py first."
 
     full_dataset = VideoDataset(root_dir='dataset')
     train_size = int(0.8 * len(full_dataset))
@@ -69,8 +77,14 @@ def run_training(model_name, epochs=5, status_placeholder=None):
 
     train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
 
-    # Initialize Specific Model
-    model = get_model(model_name).to(device)
+    # Initialize Model
+    model = get_model(model_name)
+    model = model.to(device)
+
+    # --- ENABLE MULTI-GPU (DataParallel) ---
+    if torch.cuda.device_count() > 1:
+        print(f"🚀 activating DataParallel for {torch.cuda.device_count()} GPUs")
+        model = nn.DataParallel(model)
 
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), lr=1e-4)
@@ -90,20 +104,22 @@ def run_training(model_name, epochs=5, status_placeholder=None):
             running_loss += loss.item()
 
         avg_loss = running_loss / len(train_loader)
-        msg = f"Epoch {epoch + 1}/{epochs} - Loss: {avg_loss:.4f}"
-        print(msg)
+        log_msg = f"Epoch {epoch + 1}/{epochs} - Loss: {avg_loss:.4f}"
+        print(log_msg)
         if status_placeholder:
-            status_placeholder.text(msg)
+            status_placeholder.text(log_msg)
 
-    # Save with Unique Name
-    # e.g., "model_3D_CNN.pth"
+    # Save Model (Handle DataParallel Wrapper)
     safe_name = model_name.replace(" ", "_")
     save_path = f"model_{safe_name}.pth"
-    torch.save(model.state_dict(), save_path)
+
+    if isinstance(model, nn.DataParallel):
+        torch.save(model.module.state_dict(), save_path)
+    else:
+        torch.save(model.state_dict(), save_path)
 
     return f"Success! Model saved as {save_path}"
 
 
 if __name__ == "__main__":
-    # Default behavior if run directly
     run_training("CNN-LSTM")
