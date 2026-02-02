@@ -3,44 +3,37 @@ import torch
 import cv2
 import numpy as np
 import os
+import time  # <--- IMPORT TIME
 import tempfile
 import altair as alt
 import pandas as pd
 from model import get_model
 from train import run_training
+from metrics_manager import MetricsManager  # <--- IMPORT METRICS MANAGER
 
 # --- PAGE CONFIG ---
 st.set_page_config(page_title="Medical AI Platform", layout="wide", page_icon="🧬")
 
-# --- SIDEBAR & DIAGNOSTICS ---
 st.sidebar.title("🧬 AI Control Center")
 
-# Check GPU Status
+# Check GPU
 if torch.cuda.is_available():
-    gpu_count = torch.cuda.device_count()
-    gpu_name = torch.cuda.get_device_name(0)
-    st.sidebar.success(f"🟢 {gpu_count} GPUs Detected")
-    st.sidebar.caption(f"Primary: {gpu_name}")
     DEVICE = torch.device("cuda")
+    st.sidebar.success(f"🟢 GPU Active: {torch.cuda.get_device_name(0)}")
 else:
-    st.sidebar.error("🔴 CPU Only Mode")
-    st.sidebar.caption("PyTorch cannot see your GPUs.")
     DEVICE = torch.device("cpu")
+    st.sidebar.error("🔴 CPU Mode")
 
 app_mode = st.sidebar.selectbox("Select Mode", ["Run Analysis", "Train Model"])
-
-# --- SHARED CONSTANTS ---
 IMG_SIZE = 224
 SEQ_LEN = 16
 
 
-# --- HELPER: VIDEO PREPROCESSING ---
 def process_video(video_path):
     cap = cv2.VideoCapture(video_path)
     frames = []
     frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     step = max(1, frame_count // SEQ_LEN)
-
     for i in range(SEQ_LEN):
         cap.set(cv2.CAP_PROP_POS_FRAMES, i * step)
         ret, frame = cap.read()
@@ -62,21 +55,17 @@ def process_video(video_path):
 if app_mode == "Train Model":
     st.title("🛠️ Train a New Model")
 
-    model_choice = st.selectbox(
-        "Choose Architecture",
-        ["CNN-LSTM", "3D CNN", "Video Transformer"]
-    )
-
+    model_choice = st.selectbox("Choose Architecture", ["CNN-LSTM", "3D CNN", "Video Transformer"])
     epochs = st.slider("Epochs", 1, 20, 5)
 
     if st.button(f"Start Training {model_choice}"):
         if not os.path.exists("dataset"):
-            st.error("No dataset found! Run 'preprocess.py' first.")
+            st.error("No dataset found!")
         else:
             status_text = st.empty()
-            with st.spinner(f"Training on {DEVICE}..."):
-                result_msg = run_training(model_choice, epochs, status_text)
-            st.success(result_msg)
+            with st.spinner("Training in progress..."):
+                result = run_training(model_choice, epochs, status_text)
+            st.success(result)
 
 # ==========================================
 # MODE 2: RUN ANALYSIS
@@ -87,27 +76,30 @@ elif app_mode == "Run Analysis":
     available_models = [f for f in os.listdir('.') if f.endswith('.pth') and f.startswith('model_')]
 
     if not available_models:
-        st.warning("No trained models found. Train one first!")
+        st.warning("No models found. Please Train one first.")
     else:
-        col1, col2 = st.columns([1, 2])
+        # --- MODEL SELECTION ---
+        col_sel, col_stats = st.columns([1, 2])
 
-        with col1:
-            selected_weight_file = st.selectbox("Select Model", available_models)
+        with col_sel:
+            selected_file = st.selectbox("Select Trained Model", available_models)
 
-            if "CNN-LSTM" in selected_weight_file:
+            # Determine Architecture
+            if "CNN-LSTM" in selected_file:
                 arch = "CNN-LSTM"
-            elif "3D_CNN" in selected_weight_file:
+            elif "3D_CNN" in selected_file:
                 arch = "3D CNN"
-            elif "Transformer" in selected_weight_file:
+            elif "Transformer" in selected_file:
                 arch = "Video Transformer"
             else:
-                arch = st.selectbox("Architecture Type", ["CNN-LSTM", "3D CNN", "Video Transformer"])
+                arch = "CNN-LSTM"  # Fallback
 
+            # Load Weights
             try:
                 model = get_model(arch)
-                state_dict = torch.load(selected_weight_file, map_location=DEVICE)
+                state_dict = torch.load(selected_file, map_location=DEVICE)
 
-                # Handle DataParallel keys if loaded on single device
+                # Clean DataParallel keys if needed
                 if list(state_dict.keys())[0].startswith('module.'):
                     from collections import OrderedDict
 
@@ -120,48 +112,91 @@ elif app_mode == "Run Analysis":
 
                 model.to(DEVICE)
                 model.eval()
-                st.success(f"Loaded {arch}")
+                st.success(f"Loaded: {arch}")
             except Exception as e:
-                st.error(f"Error loading model: {e}")
+                st.error(f"Load Error: {e}")
                 model = None
 
-        with col2:
-            uploaded_file = st.file_uploader("Upload Video", type=["mp4", "avi"])
+        # --- MODEL REPORT CARD (METRICS) ---
+        with col_stats:
+            metrics_mgr = MetricsManager(arch)
+            stats = metrics_mgr.load_metrics()
 
-            if uploaded_file and model:
-                tfile = tempfile.NamedTemporaryFile(delete=False, suffix='.mp4')
-                tfile.write(uploaded_file.read())
-                tfile.close()  # Fix Windows lock
+            if stats:
+                st.markdown("### 📊 Model Performance Report")
+                m1, m2, m3, m4 = st.columns(4)
+                m1.metric("Accuracy", f"{stats['accuracy']:.1%}")
+                m2.metric("Sensitivity", f"{stats['sensitivity']:.1%}")
+                m3.metric("Specificity", f"{stats['specificity']:.1%}")
+                m4.metric("Train Time", f"{stats['training_time_seconds']:.1f}s")
 
-                video_path = tfile.name
-                st.video(video_path)
+                with st.expander("View Detailed Plots"):
+                    p1, p2 = st.columns(2)
+                    if os.path.exists(metrics_mgr.cm_file):
+                        p1.image(metrics_mgr.cm_file, caption="Confusion Matrix")
+                    if os.path.exists(metrics_mgr.roc_file):
+                        p2.image(metrics_mgr.roc_file, caption="ROC Curve")
+            else:
+                st.info("No training metrics found for this model.")
 
-                if st.button("Analyze Video"):
-                    with st.spinner("Analyzing..."):
-                        try:
-                            input_tensor = process_video(video_path)
-                            with torch.no_grad():
-                                outputs = model(input_tensor)
-                                probs = torch.nn.functional.softmax(outputs, dim=1)
-                                conf, pred = torch.max(probs, 1)
+        st.divider()
 
-                            res = {'Normal': probs[0][0].item(), 'Abnormal': probs[0][1].item()}
+        # --- LIVE INFERENCE ---
+        st.subheader("Run Prediction")
+        uploaded_file = st.file_uploader("Upload Scan", type=["mp4", "avi"])
 
+        if uploaded_file and model:
+            tfile = tempfile.NamedTemporaryFile(delete=False, suffix='.mp4')
+            tfile.write(uploaded_file.read())
+            tfile.close()
+
+            video_path = tfile.name
+            st.video(video_path)
+
+            if st.button("Analyze Video"):
+                with st.spinner("Processing..."):
+                    try:
+                        # 1. Preprocessing Time
+                        t0 = time.time()
+                        input_tensor = process_video(video_path)
+
+                        # 2. Inference Time
+                        t1 = time.time()
+                        with torch.no_grad():
+                            outputs = model(input_tensor)
+                            probs = torch.nn.functional.softmax(outputs, dim=1)
+                            conf, pred = torch.max(probs, 1)
+                        t2 = time.time()
+
+                        inference_time = t2 - t1
+                        total_process_time = t2 - t0
+
+                        # Display Results
+                        res = {'Normal': probs[0][0].item(), 'Abnormal': probs[0][1].item()}
+
+                        c1, c2 = st.columns([1, 1])
+                        with c1:
                             if pred.item() == 1:
-                                st.error(f"🚨 ANOMALY DETECTED ({res['Abnormal']:.1%})")
+                                st.error(f"🚨 ANOMALY DETECTED")
                             else:
-                                st.success(f"✅ NORMAL SCAN ({res['Normal']:.1%})")
+                                st.success(f"✅ NORMAL SCAN")
+                            st.caption(f"Confidence: {conf.item():.1%}")
 
-                            df_chart = pd.DataFrame({"Class": list(res.keys()), "Probability": list(res.values())})
-                            chart = alt.Chart(df_chart).mark_bar().encode(
-                                x='Class', y='Probability',
-                                color=alt.Color('Class', scale=alt.Scale(domain=['Normal', 'Abnormal'],
-                                                                         range=['#2ecc71', '#e74c3c']))
-                            )
-                            st.altair_chart(chart, use_container_width=True)
+                        with c2:
+                            st.metric("Inference Time", f"{inference_time * 1000:.0f} ms")
+                            st.caption(f"Total Process Time: {total_process_time:.2f}s")
 
-                        except Exception as e:
-                            st.error(f"Analysis Error: {e}")
-                        finally:
-                            if os.path.exists(video_path):
-                                os.unlink(video_path)
+                        # Chart
+                        df_chart = pd.DataFrame({"Class": list(res.keys()), "Probability": list(res.values())})
+                        chart = alt.Chart(df_chart).mark_bar().encode(
+                            x='Class', y='Probability',
+                            color=alt.Color('Class', scale=alt.Scale(domain=['Normal', 'Abnormal'],
+                                                                     range=['#2ecc71', '#e74c3c']))
+                        )
+                        st.altair_chart(chart, use_container_width=True)
+
+                    except Exception as e:
+                        st.error(f"Error: {e}")
+                    finally:
+                        if os.path.exists(video_path):
+                            os.unlink(video_path)
