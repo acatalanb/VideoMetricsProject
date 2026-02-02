@@ -6,17 +6,12 @@ import cv2
 import glob
 import os
 import numpy as np
-import json
-import matplotlib.pyplot as plt
-from sklearn.metrics import accuracy_score
 from model import get_model
+from metrics_manager import MetricsManager  # <--- IMPORT NEW CLASS
 
 # --- CONFIG ---
 IMG_SIZE = 224
 SEQ_LEN = 16
-# INCREASED BATCH SIZE:
-# Since you have 2 GPUs, we can process more data at once.
-# Try 8 or 16. If you get "Out of Memory", lower it back to 4.
 BATCH_SIZE = 8
 
 
@@ -52,21 +47,22 @@ class VideoDataset(Dataset):
 
 
 def run_training(model_name, epochs=5, status_placeholder=None):
-    # --- GPU DIAGNOSTICS ---
+    # 1. Initialize Metrics Manager
+    metrics_manager = MetricsManager(model_name)
+
+    # 2. Setup Device
     if torch.cuda.is_available():
-        gpu_count = torch.cuda.device_count()
         device = torch.device("cuda")
-        gpu_names = [torch.cuda.get_device_name(i) for i in range(gpu_count)]
-        msg = f"✅ SUCCESS: Detected {gpu_count} GPUs: {', '.join(gpu_names)}"
+        msg = f"✅ Training on GPU: {torch.cuda.get_device_name(0)}"
     else:
         device = torch.device("cpu")
-        msg = "⚠️ CRITICAL WARNING: PyTorch cannot see GPUs. Training will be slow (CPU)."
+        msg = "⚠️ Training on CPU."
 
     print(msg)
     if status_placeholder:
         status_placeholder.text(msg)
 
-    # Load Data
+    # 3. Load Data
     if not os.path.exists('dataset'):
         return "Error: Dataset not found. Run preprocess.py first."
 
@@ -76,25 +72,24 @@ def run_training(model_name, epochs=5, status_placeholder=None):
     train_dataset, val_dataset = random_split(full_dataset, [train_size, val_size])
 
     train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False)  # Validation Loader
 
-    # Initialize Model
-    model = get_model(model_name)
-    model = model.to(device)
-
-    # --- ENABLE MULTI-GPU (DataParallel) ---
+    # 4. Initialize Model
+    model = get_model(model_name).to(device)
     if torch.cuda.device_count() > 1:
-        print(f"🚀 activating DataParallel for {torch.cuda.device_count()} GPUs")
         model = nn.DataParallel(model)
 
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), lr=1e-4)
 
-    # Training Loop
+    # --- START TIMER ---
+    metrics_manager.start_training_timer()
+
+    # 5. Training Loop
     for epoch in range(epochs):
         model.train()
         running_loss = 0.0
-
-        for i, (videos, labels) in enumerate(train_loader):
+        for videos, labels in train_loader:
             videos, labels = videos.to(device), labels.to(device)
             optimizer.zero_grad()
             outputs = model(videos)
@@ -104,21 +99,51 @@ def run_training(model_name, epochs=5, status_placeholder=None):
             running_loss += loss.item()
 
         avg_loss = running_loss / len(train_loader)
-        log_msg = f"Epoch {epoch + 1}/{epochs} - Loss: {avg_loss:.4f}"
-        print(log_msg)
+        log = f"Epoch {epoch + 1}/{epochs} - Loss: {avg_loss:.4f}"
+        print(log)
         if status_placeholder:
-            status_placeholder.text(log_msg)
+            status_placeholder.text(log)
 
-    # Save Model (Handle DataParallel Wrapper)
+    # --- STOP TIMER ---
+    total_time = metrics_manager.stop_training_timer()
+
+    # 6. Save Model
     safe_name = model_name.replace(" ", "_")
     save_path = f"model_{safe_name}.pth"
-
     if isinstance(model, nn.DataParallel):
         torch.save(model.module.state_dict(), save_path)
     else:
         torch.save(model.state_dict(), save_path)
 
-    return f"Success! Model saved as {save_path}"
+    # 7. Final Evaluation & Metrics Saving
+    if status_placeholder:
+        status_placeholder.text("Running final evaluation...")
+
+    model.eval()
+    all_preds = []
+    all_labels = []
+    all_probs = []
+
+    with torch.no_grad():
+        for videos, labels in val_loader:
+            videos, labels = videos.to(device), labels.to(device)
+            outputs = model(videos)
+            probs = torch.nn.functional.softmax(outputs, dim=1)
+
+            all_probs.extend(probs[:, 1].cpu().numpy())
+            _, preds = torch.max(probs, 1)
+            all_preds.extend(preds.cpu().numpy())
+            all_labels.extend(labels.cpu().numpy())
+
+    # Calculate & Save
+    stats = metrics_manager.compute_metrics(all_labels, all_preds, all_probs)
+    metrics_manager.save_metrics(stats, total_time)
+
+    # Generate Plots
+    metrics_manager.plot_confusion_matrix(np.array(stats['confusion_matrix']))
+    metrics_manager.plot_roc_curve(stats['roc_data']['fpr'], stats['roc_data']['tpr'], stats['auc'])
+
+    return f"Success! Model saved to {save_path}. Training took {total_time:.2f}s."
 
 
 if __name__ == "__main__":
