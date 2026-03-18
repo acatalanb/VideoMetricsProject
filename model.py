@@ -1,3 +1,18 @@
+"""
+model.py - Video Classification Model Architectures
+
+This module contains three different deep learning architectures for video classification:
+1. CNN-LSTM: Combines ResNet18 feature extraction with LSTM temporal modeling
+2. 3D CNN: Uses ResNet R(2+1)D for spatiotemporal feature learning
+3. Video Transformer: Leverages VideoMAE pretrained transformer architecture
+
+The module provides a factory function get_model() to instantiate any of these architectures.
+
+Author: Video Metrics Project Team
+Created: 2026-03-18
+Version: 1.0.0-alpha
+"""
+
 import torch
 import torch.nn as nn
 from torchvision import models

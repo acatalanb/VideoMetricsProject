@@ -1,3 +1,20 @@
+"""
+metrics_manager.py - Model Performance Evaluation and Visualization
+
+This module provides the MetricsManager class for comprehensive model evaluation:
+- Computes classification metrics (accuracy, sensitivity, specificity, precision, F1, AUC)
+- Handles both binary and multi-class classification scenarios
+- Generates confusion matrix and ROC curve visualizations
+- Saves metrics to JSON files for persistent storage and later retrieval
+- Tracks training time for performance benchmarking
+
+All metrics and visualizations are saved to a 'cache' directory organized by model name.
+
+Author: Video Metrics Project Team
+Created: 2026-03-18
+Version: 1.0.0-alpha
+"""
+
 import time
 import json
 import os
@@ -10,10 +27,12 @@ from sklearn.metrics import confusion_matrix, accuracy_score, roc_curve, auc, pr
 class MetricsManager:
     def __init__(self, model_name):
         # Create a safe filename safe string (e.g. "3D CNN" -> "3D_CNN")
+        self.cache_dir = 'cache'
+        os.makedirs(self.cache_dir, exist_ok=True)
         self.safe_name = model_name.replace(" ", "_")
-        self.metrics_file = f"metrics_{self.safe_name}.json"
-        self.cm_file = f"cm_{self.safe_name}.png"
-        self.roc_file = f"roc_{self.safe_name}.png"
+        self.metrics_file = os.path.join(self.cache_dir, f"metrics_{self.safe_name}.json")
+        self.cm_file = os.path.join(self.cache_dir, f"cm_{self.safe_name}.png")
+        self.roc_file = os.path.join(self.cache_dir, f"roc_{self.safe_name}.png")
         self.start_time = None
         self.end_time = None
 
@@ -29,14 +48,20 @@ class MetricsManager:
 
         # 1. Confusion Matrix elements
         cm = confusion_matrix(y_true, y_pred)
-        tn, fp, fn, tp = cm.ravel()
+
+        # Check if binary classification
+        if cm.shape == (2, 2):
+            tn, fp, fn, tp = cm.ravel()
+            specificity = tn / (tn + fp) if (tn + fp) > 0 else 0
+        else:
+            # For multi-class, specificity isn't directly applicable
+            specificity = None
 
         # 2. Derived Metrics
         accuracy = accuracy_score(y_true, y_pred)
-        sensitivity = recall_score(y_true, y_pred)  # Same as Recall
-        specificity = tn / (tn + fp) if (tn + fp) > 0 else 0
-        precision = precision_score(y_true, y_pred, zero_division=0)
-        f1 = f1_score(y_true, y_pred, zero_division=0)
+        sensitivity = recall_score(y_true, y_pred, average='binary' if cm.shape == (2, 2) else 'macro', zero_division=0)
+        precision = precision_score(y_true, y_pred, average='binary' if cm.shape == (2, 2) else 'macro', zero_division=0)
+        f1 = f1_score(y_true, y_pred, average='binary' if cm.shape == (2, 2) else 'macro', zero_division=0)
 
         # 3. AUC calculation
         try:

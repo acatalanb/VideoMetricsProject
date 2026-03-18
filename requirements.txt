@@ -1,0 +1,10 @@
+torch==2.7.0
+torchvision==0.22.0
+streamlit
+opencv-python==4.11.0.86
+numpy==1.26.4
+scikit-learn==1.5.0
+matplotlib==3.9.0
+seaborn==0.13.2
+pandas==2.2.2
+altair

@@ -1,3 +1,20 @@
+"""
+train.py - Model Training Pipeline
+
+This module handles the complete training workflow for video classification models:
+- VideoDataset class for loading and preprocessing video data
+- run_training() function that orchestrates training, evaluation, and metrics generation
+- Automatic GPU detection and multi-GPU support via DataParallel
+- Integration with MetricsManager for comprehensive performance tracking
+
+The training pipeline includes 80/20 train/validation split, Adam optimization,
+and generates confusion matrices and ROC curves upon completion.
+
+Author: Video Metrics Project Team
+Created: 2026-03-18
+Version: 1.0.0-alpha
+"""
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -7,16 +24,17 @@ import glob
 import os
 import numpy as np
 from model import get_model
-from metrics_manager import MetricsManager  # <--- IMPORT NEW CLASS
+from metrics_manager import MetricsManager
 
 # --- CONFIG ---
 IMG_SIZE = 224
 SEQ_LEN = 16
 BATCH_SIZE = 8
+DEFAULT_ROOT = r"K:/VideoDataset/kvasir"
 
 
 class VideoDataset(Dataset):
-    def __init__(self, root_dir):
+    def __init__(self, root_dir=DEFAULT_ROOT):
         self.video_paths = []
         self.labels = []
         norm_files = glob.glob(os.path.join(root_dir, 'normal', '*.mp4'))
@@ -46,7 +64,7 @@ class VideoDataset(Dataset):
         return torch.tensor(np.array(frames[:SEQ_LEN])), torch.tensor(label)
 
 
-def run_training(model_name, epochs=5, status_placeholder=None):
+def run_training(model_name, epochs=5, status_placeholder=None, dataset_path=DEFAULT_ROOT):
     # 1. Initialize Metrics Manager
     metrics_manager = MetricsManager(model_name)
 
@@ -63,10 +81,10 @@ def run_training(model_name, epochs=5, status_placeholder=None):
         status_placeholder.text(msg)
 
     # 3. Load Data
-    if not os.path.exists('dataset'):
-        return "Error: Dataset not found. Run preprocess.py first."
+    if not os.path.exists(dataset_path):
+        return f"Error: Dataset not found at {dataset_path}. Run preprocess.py first."
 
-    full_dataset = VideoDataset(root_dir='dataset')
+    full_dataset = VideoDataset(root_dir=dataset_path)
     train_size = int(0.8 * len(full_dataset))
     val_size = len(full_dataset) - train_size
     train_dataset, val_dataset = random_split(full_dataset, [train_size, val_size])
@@ -108,8 +126,10 @@ def run_training(model_name, epochs=5, status_placeholder=None):
     total_time = metrics_manager.stop_training_timer()
 
     # 6. Save Model
+    cache_dir = 'cache'
+    os.makedirs(cache_dir, exist_ok=True)
     safe_name = model_name.replace(" ", "_")
-    save_path = f"model_{safe_name}.pth"
+    save_path = os.path.join(cache_dir, f"model_{safe_name}.pth")
     if isinstance(model, nn.DataParallel):
         torch.save(model.module.state_dict(), save_path)
     else:
