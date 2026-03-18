@@ -1,30 +1,55 @@
+"""
+app.py - Video Classification Web Application
+
+This is the main Streamlit application that provides a user-friendly interface for:
+1. Dataset Selection: Choose between Kvasir Chest X-Ray and UCF Crime datasets
+2. Model Training: Train CNN-LSTM, 3D CNN, or Video Transformer architectures
+3. Live Analysis: Load trained models and run inference on uploaded videos
+
+The app displays real-time performance metrics, confusion matrices, ROC curves,
+inference times, and probability distributions for predictions. Supports both
+CPU and GPU execution with automatic detection.
+
+Author: Video Metrics Project Team
+Created: 2026-03-18
+Version: 1.0.0-alpha
+"""
+
 import streamlit as st
 import torch
 import cv2
 import numpy as np
 import os
-import time  # <--- IMPORT TIME
+import time
 import tempfile
 import altair as alt
 import pandas as pd
 from model import get_model
 from train import run_training
-from metrics_manager import MetricsManager  # <--- IMPORT METRICS MANAGER
+from metrics_manager import MetricsManager
+
+KVASIR_DATASET_PATH = 'K:\VideoDataset\kvasir'
+UCF_DATASET_PATH = 'K:\VideoDataset\crime-ucf'
 
 # --- PAGE CONFIG ---
-st.set_page_config(page_title="Medical AI Platform", layout="wide", page_icon="🧬")
+st.set_page_config(page_title="AI Platform", layout="wide", page_icon="🧬")
 
 st.sidebar.title("🧬 AI Control Center")
+
+# Initialize session state for dataset choice
+if 'dataset_path' not in st.session_state:
+    st.session_state.dataset_path = KVASIR_DATASET_PATH
 
 # Check GPU
 if torch.cuda.is_available():
     DEVICE = torch.device("cuda")
-    st.sidebar.success(f"🟢 GPU Active: {torch.cuda.get_device_name(0)}")
+    gpu_count = torch.cuda.device_count()
+    st.sidebar.success(f"🟢 GPU Active: {torch.cuda.get_device_name(0)} ({gpu_count} GPU{'s' if gpu_count > 1 else ''} available)")
 else:
     DEVICE = torch.device("cpu")
     st.sidebar.error("🔴 CPU Mode")
 
-app_mode = st.sidebar.selectbox("Select Mode", ["Run Analysis", "Train Model"])
+app_mode = st.sidebar.selectbox("Select Mode", ["Dataset", "Train Model", "Run Analysis" ])
 IMG_SIZE = 224
 SEQ_LEN = 16
 
@@ -48,7 +73,6 @@ def process_video(video_path):
     cap.release()
     return torch.tensor(np.array(frames)).unsqueeze(0).to(DEVICE)
 
-
 # ==========================================
 # MODE 1: TRAIN MODEL
 # ==========================================
@@ -59,12 +83,13 @@ if app_mode == "Train Model":
     epochs = st.slider("Epochs", 1, 20, 5)
 
     if st.button(f"Start Training {model_choice}"):
-        if not os.path.exists("dataset"):
-            st.error("No dataset found!")
+        dataset_path = st.session_state.dataset_path
+        if not os.path.exists(dataset_path):
+            st.error(f"No dataset found at {dataset_path}!")
         else:
             status_text = st.empty()
             with st.spinner("Training in progress..."):
-                result = run_training(model_choice, epochs, status_text)
+                result = run_training(model_choice, epochs, status_text, dataset_path)
             st.success(result)
 
 # ==========================================
@@ -73,7 +98,9 @@ if app_mode == "Train Model":
 elif app_mode == "Run Analysis":
     st.title("🏥 Live Anomaly Detection")
 
-    available_models = [f for f in os.listdir('.') if f.endswith('.pth') and f.startswith('model_')]
+    cache_dir = 'cache'
+    os.makedirs(cache_dir, exist_ok=True)
+    available_models = [f for f in os.listdir(cache_dir) if f.endswith('.pth') and f.startswith('model_')]
 
     if not available_models:
         st.warning("No models found. Please Train one first.")
@@ -97,7 +124,8 @@ elif app_mode == "Run Analysis":
             # Load Weights
             try:
                 model = get_model(arch)
-                state_dict = torch.load(selected_file, map_location=DEVICE)
+                model_path = os.path.join(cache_dir, selected_file)
+                state_dict = torch.load(model_path, map_location=DEVICE)
 
                 # Clean DataParallel keys if needed
                 if list(state_dict.keys())[0].startswith('module.'):
@@ -127,7 +155,7 @@ elif app_mode == "Run Analysis":
                 m1, m2, m3, m4 = st.columns(4)
                 m1.metric("Accuracy", f"{stats['accuracy']:.1%}")
                 m2.metric("Sensitivity", f"{stats['sensitivity']:.1%}")
-                m3.metric("Specificity", f"{stats['specificity']:.1%}")
+                m3.metric("Specificity", f"{stats['specificity']:.1%}" if stats['specificity'] is not None else "N/A")
                 m4.metric("Train Time", f"{stats['training_time_seconds']:.1f}s")
 
                 with st.expander("View Detailed Plots"):
@@ -200,3 +228,19 @@ elif app_mode == "Run Analysis":
                     finally:
                         if os.path.exists(video_path):
                             os.unlink(video_path)
+
+# ==========================================
+# MODE 3: DATASET
+# ==========================================
+elif app_mode == "Dataset":
+    st.title("Dataset to train")
+
+    dataset_choice = st.selectbox("Select Dataset", ["Kvasir Chest X-Ray", "UCF Crime"])
+
+    # Update dataset path based on selection
+    if dataset_choice == "Kvasir Chest X-Ray":
+        st.session_state.dataset_path = KVASIR_DATASET_PATH
+    elif dataset_choice == "UCF Crime":
+        st.session_state.dataset_path = UCF_DATASET_PATH
+
+    st.info(f"Selected dataset path: {st.session_state.dataset_path}")
